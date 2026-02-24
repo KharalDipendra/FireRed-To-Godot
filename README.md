@@ -1,61 +1,73 @@
-# ROM Asset Extractor (C#)
+# FireRed to Godot
 
-> **Forked from [TheJjokerR/ROM-Asset-Extractor](https://github.com/TheJjokerR/ROM-Asset-Extractor)**
-> Original project by **tjtwl** — licensed under GPL-3.0.
+Extract maps, sprites, and tilesets from Pokémon GBA ROMs and turn them into ready-to-use **Godot 4.3+** projects.
 
-A tool for extracting assets (sprites, maps, tilesets) from third-generation Pokémon GBA ROMs.
+I forked [TheJjokerR's ROM-Asset-Extractor](https://github.com/TheJjokerR/ROM-Asset-Extractor) and built on top of it to add Godot export — so you can go straight from a ROM or a [pokefirered](https://github.com/pret/pokefirered) decomp into a Godot project with working TileMaps, TileSets, and map data.
+
+![Godot Export](screenshots/godot.png)
 
 ---
 
-## Quick Start
-
-### Requirements
+## What You Need
 
 - .NET Framework 4.7.2+
 - Visual Studio 2019+ (or `dotnet build`)
-- [pret/pokefirered](https://github.com/pret/pokefirered) decomp project (required for `DecompToGodot`)
+- A Pokémon GBA ROM (FireRed, Ruby, or LeafGreen — English USA versions)
+- **The [pret/pokefirered](https://github.com/pret/pokefirered) decompiled binary** — this is required for the tool to work. Clone or download it from [github.com/pret/pokefirered](https://github.com/pret/pokefirered) and build it following their instructions.
 
-### Build
+## Getting Started
 
-1. Clone this repository.
-2. Open `RomAssetExtractor.sln` in Visual Studio.
-3. Restore NuGet packages and build the solution.
+1. Clone this repo
+2. Open `RomAssetExtractor.sln` in Visual Studio
+3. Restore NuGet packages and build
 
-### Command Line
+All build output goes to `./bin/Debug/` (or `./bin/Release/`) at the project root.
+
+---
+
+## Godot Export
+
+There are two ways to get maps into Godot:
+
+### From a ROM directly
+
+`RomAssetExtractor.Godot` takes the extracted map data and generates a full Godot project — TileSet resources (`.tres`), TileMap scenes (`.tscn`), and JSON files with NPC positions, warps, and animation info.
+
+### From a pokefirered decomp
+
+`DecompToGodot` skips the ROM entirely and reads map data straight from a [pret/pokefirered](https://github.com/pret/pokefirered) decomp folder.
+
+```
+DecompToGodot.exe <decomp-path> <output-path> [map-filter]
+```
+
+For example:
+```
+DecompToGodot.exe C:\pokefirered-master C:\MyGodotProject\maps PalletTown,Route1
+```
+
+Either way, the output folder can be opened directly as a Godot 4.3+ project.
+
+---
+
+## Extracting Assets (CLI)
 
 ```
 RomAssetExtractor.Cli.exe --rom "path/to/rom.gba"
 ```
 
-**Options:**
-
-| Flag | Description | Default |
+| Flag | What it does | Default |
 |------|-------------|---------|
-| `--rom` / `-r` | Path to the GBA ROM file **(required)** | — |
-| `--output` / `-o` | Output directory for extracted assets | `output` |
-| `--save-bitmaps` / `-sb` | Save bitmap images | `True` |
+| `--rom` / `-r` | Path to the GBA ROM **(required)** | — |
+| `--output` / `-o` | Where to save extracted assets | `output` |
+| `--save-bitmaps` / `-sb` | Save sprite/tileset images | `True` |
 | `--save-trainers` / `-st` | Save trainer data | `True` |
 | `--save-maps` / `-sm` | Save map data | `True` |
-| `--save-map-renders` / `-smr` | Save full map renders | `False` |
+| `--save-map-renders` / `-smr` | Render full map images | `False` |
 
-### As a Library
+## UI
 
-Reference `RomAssetExtractor.csproj` in your project:
-
-```csharp
-await AssetExtractor.ExtractRom(
-    "path/to/rom",
-    "path/to/output",
-    shouldSaveBitmaps,
-    shouldSaveTrainers,
-    shouldSaveMaps,
-    logTextWriter
-);
-```
-
-### UI
-
-Build and run `RomAssetExtractor.UI` for a Windows Forms GUI.
+There's also a Windows Forms GUI if you prefer clicking over typing:
 
 ![UI Showcase](screenshots/UI_Showcase.png)
 
@@ -63,74 +75,49 @@ Build and run `RomAssetExtractor.UI` for a Windows Forms GUI.
 
 ---
 
-## Version Support
+## ROM Support
 
-Only English (USA) ROMs are currently tested.
+Only English (USA) ROMs are tested right now:
 
-| Game | Partial | Notes |
-|------|---------|-------|
-| Ruby | AXVE | Other language codes unsupported |
-| FireRed | BPRE | Other language codes unsupported |
-| LeafGreen | BPEE | Other language codes unsupported |
-| Sapphire | — | Not yet supported |
-| Emerald | — | Not yet supported |
+| Game | Status | ROM Code |
+|------|--------|----------|
+| FireRed | Partial | BPRE |
+| Ruby | Partial | AXVE |
+| LeafGreen | Partial | BPEE |
+| Sapphire | Not yet | — |
+| Emerald | Not yet | — |
 
-Additional versions can be configured via offsets in `pokeroms.yml`.
-
----
-
-## Godot Integration
-
-![Godot Export](screenshots/godot.png)
-
-This project includes two tools for exporting ROM map data into **Godot 4.3+** projects:
-
-- **`RomAssetExtractor.Godot`** — Exports ROM-extracted map data as a ready-to-open Godot project with TileSet resources (`.tres`), TileMap scenes (`.tscn`), and per-map JSON files containing NPC/event data and animation metadata.
-
-- **`DecompToGodot`** — Converts a [pret/pokefirered](https://github.com/pret/pokefirered) (or similar Gen 3) decomp project directly into Godot 4.3+ scenes, tilesets, and metadata.
-
-  ```
-  DecompToGodot.exe <decomp-path> <output-path> [map-filter]
-  ```
-  Example: `DecompToGodot.exe C:\pokefirered-master C:\MyGodotProject\maps PalletTown,Route1`
-
-The output can be opened directly as a Godot project.
+You can add support for other versions by configuring the offsets in `pokeroms.yml`.
 
 ---
 
-## Project Structure
+## Project Layout
 
-| Project | Description |
-|---------|-------------|
-| `RomAssetExtractor` | Core library — ROM reading, asset extraction |
-| `RomAssetExtractor.Cli` | Command-line interface |
+| Folder | What's in it |
+|--------|-------------|
+| `RomAssetExtractor` | Core library — reads ROMs, extracts assets |
+| `RomAssetExtractor.Cli` | Command-line tool |
 | `RomAssetExtractor.UI` | Windows Forms GUI |
-| `RomAssetExtractor.Godot` | Exports ROM maps as Godot 4.3+ TileMap scenes |
-| `DecompToGodot` | Converts [pokefirered](https://github.com/pret/pokefirered) decomp maps to Godot scenes |
-
----
-
-## License
-
-GPL-3.0 — see [LICENSE](LICENSE) for the full text.
-
-**Original Copyright (C) 2021 TheJjokerR**
+| `RomAssetExtractor.Godot` | Turns extracted maps into Godot scenes |
+| `DecompToGodot` | Reads a pokefirered decomp and outputs Godot scenes |
 
 ---
 
 ## Credits
 
-- **Original project:** [TheJjokerR/ROM-Asset-Extractor](https://github.com/TheJjokerR/ROM-Asset-Extractor)
-- Nintendo / Creatures Inc. / GAME FREAK inc. — Pokémon and character names are trademarks of Nintendo.
-- Sprite extraction inspired by [magical/pokemon-gba-sprites](https://github.com/magical/pokemon-gba-sprites/)
-- Offset data from [jugales/pokewebkit](https://github.com/jugales/pokewebkit)
-- Bitmap/PNG writing adapted from "unLZ-GBA replacement" by Nintenlord
-- Tile extraction code from [kaisermg5/jaae](https://github.com/kaisermg5/jaae)
+This project is a fork of [TheJjokerR/ROM-Asset-Extractor](https://github.com/TheJjokerR/ROM-Asset-Extractor) (GPL-3.0, Copyright 2021 TheJjokerR). Big thanks to the original work that made this possible.
 
----
+Also credit to:
+- [magical/pokemon-gba-sprites](https://github.com/magical/pokemon-gba-sprites/) — sprite extraction reference
+- [jugales/pokewebkit](https://github.com/jugales/pokewebkit) — offset/address data
+- [kaisermg5/jaae](https://github.com/kaisermg5/jaae) — tile extraction code
+- Nintenlord's "unLZ-GBA replacement" — bitmap/PNG writing
+- Nintendo / Creatures Inc. / GAME FREAK inc. — Pokémon is their trademark
+
+## License
+
+GPL-3.0 — see [LICENSE](LICENSE).
 
 ## Disclaimer
 
-This is a personal fork for educational purposes. I am not affiliated with Nintendo or Pokémon.
-Nothing here constitutes legal advice. Use this software responsibly and respect all applicable
-copyright laws in your jurisdiction.
+This is a personal project for learning. I'm not affiliated with Nintendo or Pokémon. Not legal advice. Use responsibly and respect copyright laws in your country.
