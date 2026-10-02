@@ -8,118 +8,70 @@ namespace DecompToGodot
 {
     /// <summary>
     /// Writes Godot 4.3+ compatible files:
-    ///   .tres  — TileSet resource with Ground and Overlay atlas sources
-    ///   .tscn  — Scene with TileMapLayer nodes
+    ///   .tscn  — Scene with TileMapLayer nodes using the shared world TileSet
     ///   .json  — Per-map event data (NPCs, warps, triggers, signs, metatile attributes)
     /// </summary>
     public static class GodotWriter
     {
-        private const int ATLAS_COLUMNS = TilesetRenderer.ATLAS_COLUMNS;
         private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
-
-        // ═══════════ TileSet .tres ═══════════
-
-        /// <summary>
-        /// Write a Godot TileSet resource (.tres) referencing ground, overlay, and collision atlas PNGs.
-        /// </summary>
-        public static void WriteTileSetResource(
-            string tresPath,
-            string groundTexRelPath, string overlayTexRelPath,
-            string collisionTexRelPath,
-            int totalMetatilePositions, bool hasOverlay)
-        {
-            var sb = new StringBuilder(totalMetatilePositions * 40);
-
-            // Count: ground + [overlay] + collision textures & sources
-            int extRes = 2 + (hasOverlay ? 1 : 0);
-            int subRes = 2 + (hasOverlay ? 1 : 0);
-            int loadSteps = extRes + subRes + 1;
-
-            int nextId = 1;
-            int groundTexId = nextId++;
-            int overlayTexId = hasOverlay ? nextId++ : -1;
-            int collisionTexId = nextId++;
-
-            L(sb, $"[gd_resource type=\"TileSet\" load_steps={loadSteps} format=3]");
-            L(sb, "");
-
-            // External resources — textures
-            L(sb, $"[ext_resource type=\"Texture2D\" path=\"{groundTexRelPath}\" id=\"{groundTexId}\"]");
-            if (hasOverlay)
-                L(sb, $"[ext_resource type=\"Texture2D\" path=\"{overlayTexRelPath}\" id=\"{overlayTexId}\"]");
-            L(sb, $"[ext_resource type=\"Texture2D\" path=\"{collisionTexRelPath}\" id=\"{collisionTexId}\"]");
-            L(sb, "");
-
-            // Sub-resource — ground atlas source
-            L(sb, "[sub_resource type=\"TileSetAtlasSource\" id=\"TileSetAtlasSource_0\"]");
-            L(sb, "resource_name = \"Ground\"");
-            L(sb, $"texture = ExtResource(\"{groundTexId}\")");
-            L(sb, "texture_region_size = Vector2i(16, 16)");
-            WriteTileEntries(sb, totalMetatilePositions, ATLAS_COLUMNS);
-            L(sb, "");
-
-            // Sub-resource — overlay atlas source
-            if (hasOverlay)
-            {
-                L(sb, "[sub_resource type=\"TileSetAtlasSource\" id=\"TileSetAtlasSource_1\"]");
-                L(sb, "resource_name = \"Overlay\"");
-                L(sb, $"texture = ExtResource(\"{overlayTexId}\")");
-                L(sb, "texture_region_size = Vector2i(16, 16)");
-                WriteTileEntries(sb, totalMetatilePositions, ATLAS_COLUMNS);
-                L(sb, "");
-            }
-
-            // Sub-resource — collision overlay atlas source
-            int collisionSrcIdx = hasOverlay ? 2 : 1;
-            L(sb, $"[sub_resource type=\"TileSetAtlasSource\" id=\"TileSetAtlasSource_{collisionSrcIdx}\"]");
-            L(sb, "resource_name = \"Collisions\"");
-            L(sb, $"texture = ExtResource(\"{collisionTexId}\")");
-            L(sb, "texture_region_size = Vector2i(16, 16)");
-            int collisionTileCount = TilesetRenderer.COLLISION_COLS * TilesetRenderer.COLLISION_ROWS;
-            WriteTileEntries(sb, collisionTileCount, TilesetRenderer.COLLISION_COLS);
-            L(sb, "");
-
-            // Main [resource]
-            L(sb, "[resource]");
-            L(sb, "tile_size = Vector2i(16, 16)");
-            L(sb, "sources/0 = SubResource(\"TileSetAtlasSource_0\")");
-            if (hasOverlay)
-                L(sb, "sources/1 = SubResource(\"TileSetAtlasSource_1\")");
-            L(sb, $"sources/{collisionSrcIdx} = SubResource(\"TileSetAtlasSource_{collisionSrcIdx}\")");
-
-            File.WriteAllText(tresPath, sb.ToString(), Utf8NoBom);
-        }
-
-        private static void WriteTileEntries(StringBuilder sb, int count, int columns)
-        {
-            for (int id = 0; id < count; id++)
-            {
-                int col = id % columns;
-                int row = id / columns;
-                L(sb, $"{col}:{row}/0 = 0");
-            }
-        }
 
         // ═══════════ Map Scene .tscn ═══════════
 
         /// <summary>
-        /// Write a Godot scene (.tscn) with Ground and Overlay TileMapLayer nodes.
+        /// Maps a metatile id to its tile in the shared TileSet.
+        /// Ground and Overlay use the same atlas coordinates in their own source.
+        /// </summary>
+        public delegate bool MetatileResolver(
+            int metatileId, out int groundSource, out int overlaySource, out int atlasX, out int atlasY);
+
+        /// <summary>
+        /// Write a Godot scene (.tscn) with Ground, Overlay and Collisions TileMapLayer nodes,
+        /// all using the shared world TileSet.
         /// </summary>
         /// <param name="tscnPath">Output file path</param>
-        /// <param name="tilesetRelPath">Relative path to .tres from scenes/ dir</param>
+        /// <param name="tilesetRelPath">Relative path to the shared .tres from the scenes/ dir</param>
         /// <param name="mapName">Display name for root node</param>
         /// <param name="blockData">Block data (uint16 per cell: metatile ID in bits 0-9)</param>
         /// <param name="mapWidth">Map width in blocks</param>
         /// <param name="mapHeight">Map height in blocks</param>
-        /// <param name="hasOverlay">Whether to include overlay layer</param>
-        public static void WriteMapScene(
+        /// <param name="resolve">Finds the tile for a metatile id</param>
+        /// <returns>Number of cells whose metatile could not be resolved</returns>
+        public static int WriteMapScene(
             string tscnPath, string tilesetRelPath,
             string mapName, ushort[] blockData,
-            int mapWidth, int mapHeight, bool hasOverlay)
+            int mapWidth, int mapHeight,
+            MetatileResolver resolve)
         {
             string label = SanitizeNodeName(mapName);
 
-            var sb = new StringBuilder(mapWidth * mapHeight * 50);
+            var ground = new List<int[]>(mapWidth * mapHeight);
+            var overlay = new List<int[]>(mapWidth * mapHeight);
+            var collisions = new List<int[]>(mapWidth * mapHeight);
+            int missing = 0;
+
+            for (int y = 0; y < mapHeight; y++)
+            {
+                for (int x = 0; x < mapWidth; x++)
+                {
+                    int block = blockData[y * mapWidth + x];
+                    int collision = (block >> 10) & 0x03;
+                    int elevation = (block >> 12) & 0x0F;
+
+                    // Collision overlay: atlas X = collision column, atlas Y = elevation row
+                    collisions.Add(new[] { x, y, WorldTileset.COLLISION_SOURCE_ID, collision, elevation });
+
+                    int groundSource, overlaySource, ax, ay;
+                    if (!resolve(block & 0x03FF, out groundSource, out overlaySource, out ax, out ay))
+                    {
+                        missing++;
+                        continue;
+                    }
+                    ground.Add(new[] { x, y, groundSource, ax, ay });
+                    overlay.Add(new[] { x, y, overlaySource, ax, ay });
+                }
+            }
+
+            var sb = new StringBuilder(mapWidth * mapHeight * 150);
 
             L(sb, "[gd_scene load_steps=2 format=3]");
             L(sb, "");
@@ -130,122 +82,57 @@ namespace DecompToGodot
             L(sb, $"[node name=\"{label}\" type=\"Node2D\"]");
             L(sb, "");
 
-            // Ground layer — source 0
             L(sb, "[node name=\"Ground\" type=\"TileMapLayer\" parent=\".\"]");
             L(sb, "tile_set = ExtResource(\"1\")");
             L(sb, "texture_filter = 1");
             sb.Append("tile_map_data = ");
-            WriteTileMapData(sb, blockData, mapWidth, mapHeight, sourceId: 0);
+            WriteTileMapData(sb, ground);
             sb.Append('\n');
             L(sb, "");
 
-            // Overlay layer — source 1
-            if (hasOverlay)
-            {
-                L(sb, "[node name=\"Overlay\" type=\"TileMapLayer\" parent=\".\"]");
-                L(sb, "tile_set = ExtResource(\"1\")");
-                L(sb, "texture_filter = 1");
-                sb.Append("tile_map_data = ");
-                WriteTileMapData(sb, blockData, mapWidth, mapHeight, sourceId: 1);
-                sb.Append('\n');
-                L(sb, "");
-            }
+            L(sb, "[node name=\"Overlay\" type=\"TileMapLayer\" parent=\".\"]");
+            L(sb, "tile_set = ExtResource(\"1\")");
+            L(sb, "texture_filter = 1");
+            sb.Append("tile_map_data = ");
+            WriteTileMapData(sb, overlay);
+            sb.Append('\n');
+            L(sb, "");
 
-            // Collisions overlay layer
-            int collisionSourceId = hasOverlay ? 2 : 1;
             L(sb, "[node name=\"Collisions\" type=\"TileMapLayer\" parent=\".\"]");
             L(sb, "tile_set = ExtResource(\"1\")");
             L(sb, "modulate = Color(1, 1, 1, 0.3)");
             L(sb, "texture_filter = 1");
             L(sb, "visible = false");
             sb.Append("tile_map_data = ");
-            WriteCollisionTileMapData(sb, blockData, mapWidth, mapHeight, collisionSourceId);
+            WriteTileMapData(sb, collisions);
             sb.Append('\n');
 
             File.WriteAllText(tscnPath, sb.ToString(), Utf8NoBom);
+            return missing;
         }
 
         /// <summary>
-        /// Godot 4.3+ TileMapLayer tile_map_data — PackedByteArray.
+        /// Godot 4.3+ TileMapLayer tile_map_data as a PackedByteArray.
         /// Format: 2-byte header (version=0) + 12 bytes per cell.
         /// Each cell: x(2), y(2), sourceId(2), atlasX(2), atlasY(2), altTile(2).
         /// </summary>
-        private static void WriteTileMapData(
-            StringBuilder sb, ushort[] blockData,
-            int w, int h, int sourceId)
+        private static void WriteTileMapData(StringBuilder sb, List<int[]> cells)
         {
             const ushort TILE_MAP_DATA_FORMAT = 0;
 
-            int total = w * h;
-            var buf = new byte[2 + total * 12];
-            int off = 0;
+            var buf = new byte[2 + cells.Count * 12];
+            Put16(buf, 0, TILE_MAP_DATA_FORMAT);
 
-            Put16(buf, off, TILE_MAP_DATA_FORMAT);
-            off += 2;
-
-            for (int y = 0; y < h; y++)
+            int off = 2;
+            foreach (var c in cells)
             {
-                for (int x = 0; x < w; x++)
-                {
-                    int idx = y * w + x;
-                    // Metatile ID from block data (bits 0-9)
-                    int metatileId = blockData[idx] & 0x03FF;
-                    int ax = metatileId % ATLAS_COLUMNS;
-                    int ay = metatileId / ATLAS_COLUMNS;
-
-                    Put16(buf, off + 0, (ushort)x);
-                    Put16(buf, off + 2, (ushort)y);
-                    Put16(buf, off + 4, (ushort)sourceId);
-                    Put16(buf, off + 6, (ushort)ax);
-                    Put16(buf, off + 8, (ushort)ay);
-                    Put16(buf, off + 10, 0); // alt_tile
-                    off += 12;
-                }
-            }
-
-            sb.Append("PackedByteArray(");
-            for (int i = 0; i < buf.Length; i++)
-            {
-                if (i > 0) sb.Append(", ");
-                sb.Append(buf[i]);
-            }
-            sb.Append(')');
-        }
-
-        /// <summary>
-        /// Godot tile_map_data for the Collisions layer.
-        /// Maps each cell to (collision, elevation) in the collision atlas.
-        /// Atlas X = collision value (0-3), Atlas Y = elevation value (0-15).
-        /// </summary>
-        private static void WriteCollisionTileMapData(
-            StringBuilder sb, ushort[] blockData,
-            int w, int h, int sourceId)
-        {
-            const ushort TILE_MAP_DATA_FORMAT = 0;
-
-            int total = w * h;
-            var buf = new byte[2 + total * 12];
-            int off = 0;
-
-            Put16(buf, off, TILE_MAP_DATA_FORMAT);
-            off += 2;
-
-            for (int y = 0; y < h; y++)
-            {
-                for (int x = 0; x < w; x++)
-                {
-                    int idx = y * w + x;
-                    int collision = (blockData[idx] >> 10) & 0x03;
-                    int elevation = (blockData[idx] >> 12) & 0x0F;
-
-                    Put16(buf, off + 0, (ushort)x);
-                    Put16(buf, off + 2, (ushort)y);
-                    Put16(buf, off + 4, (ushort)sourceId);
-                    Put16(buf, off + 6, (ushort)collision);  // atlas X = collision column
-                    Put16(buf, off + 8, (ushort)elevation);   // atlas Y = elevation row
-                    Put16(buf, off + 10, 0);
-                    off += 12;
-                }
+                Put16(buf, off + 0, (ushort)c[0]);
+                Put16(buf, off + 2, (ushort)c[1]);
+                Put16(buf, off + 4, (ushort)c[2]);
+                Put16(buf, off + 6, (ushort)c[3]);
+                Put16(buf, off + 8, (ushort)c[4]);
+                Put16(buf, off + 10, 0); // alt_tile
+                off += 12;
             }
 
             sb.Append("PackedByteArray(");
@@ -270,7 +157,9 @@ namespace DecompToGodot
             ushort[] blockData,
             int mapWidth, int mapHeight,
             uint[] primaryAttributes,
-            uint[] secondaryAttributes)
+            uint[] secondaryAttributes,
+            TilesetUnit primaryUnit,
+            TilesetUnit secondaryUnit)
         {
             var sb = new StringBuilder(8192);
             sb.Append("{\n");
@@ -286,6 +175,16 @@ namespace DecompToGodot
             WriteJsonField(sb, "  ", "map_type", mapJson);
             WriteJsonField(sb, "  ", "show_map_name", mapJson);
             WriteJsonField(sb, "  ", "battle_scene", mapJson);
+
+            // ── Shared tileset sources used by this map ──
+            sb.Append("  \"tileset\": {\n");
+            sb.Append("    \"primary\": "); JStr(sb, primaryUnit.Own.Label); sb.Append(",\n");
+            sb.Append("    \"secondary\": "); JStr(sb, secondaryUnit.Own.Label); sb.Append(",\n");
+            sb.Append("    \"primary_unit\": "); JStr(sb, primaryUnit.Name); sb.Append(",\n");
+            sb.Append("    \"secondary_unit\": "); JStr(sb, secondaryUnit.Name); sb.Append(",\n");
+            sb.Append($"    \"primary_sources\": [{primaryUnit.GroundSourceId}, {primaryUnit.OverlaySourceId}],\n");
+            sb.Append($"    \"secondary_sources\": [{secondaryUnit.GroundSourceId}, {secondaryUnit.OverlaySourceId}]\n");
+            sb.Append("  },\n");
 
             // ── Connections ──
             sb.Append("  \"connections\": ");

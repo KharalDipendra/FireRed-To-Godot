@@ -91,15 +91,6 @@ namespace DecompToGodot
         public string BlockdataPath;
     }
 
-    class TilesetCacheEntry
-    {
-        public string GroundAtlasPng;   // filename only
-        public string OverlayAtlasPng;  // filename only
-        public int TotalMetatilePositions;
-        public uint[] PrimaryAttributes;
-        public uint[] SecondaryAttributes;
-    }
-
     // ──────────────────────────────────────────────────────────────────
     //  Converter
     // ──────────────────────────────────────────────────────────────────
@@ -122,9 +113,17 @@ namespace DecompToGodot
         // Tileset label → label of tileset it borrows palettes from
         private Dictionary<string, string> _tilesetPalettesFrom;
 
-        // "primaryLabel|secondaryLabel" → cache entry
-        private readonly Dictionary<string, TilesetCacheEntry> _tilesetCache
-            = new Dictionary<string, TilesetCacheEntry>();
+        // Tileset label → animation init function (.callback in headers.h)
+        private Dictionary<string, string> _tilesetCallbacks;
+        // Tileset labels in headers.h order
+        private List<string> _tilesetOrder;
+
+        // Tileset label → loaded data (null if it could not be loaded)
+        private readonly Dictionary<string, TilesetData> _tilesetData
+            = new Dictionary<string, TilesetData>();
+
+        // The one TileSet shared by every map
+        private WorldTileset _world;
 
         // layout ID → LayoutInfo
         private Dictionary<string, LayoutInfo> _layouts;
@@ -145,18 +144,17 @@ namespace DecompToGodot
             Console.WriteLine($"Decomp project: {_decompPath}");
             Console.WriteLine($"Output path:    {_outputPath}");
 
-            var tilesDir = Path.Combine(_outputPath, "tiles");
             var tsDir = Path.Combine(_outputPath, "tilesets");
+            var atlasDir = Path.Combine(tsDir, WorldTileset.ATLAS_DIR);
             var sceneDir = Path.Combine(_outputPath, "scenes");
             var dataDir = Path.Combine(_outputPath, "data");
 
-            Directory.CreateDirectory(tilesDir);
-            Directory.CreateDirectory(tsDir);
+            Directory.CreateDirectory(atlasDir);
             Directory.CreateDirectory(sceneDir);
             Directory.CreateDirectory(dataDir);
 
             // Generate collision overlay atlas (shared by all maps)
-            string collisionAtlasPath = Path.Combine(tilesDir, "collision_overlay.png");
+            string collisionAtlasPath = Path.Combine(atlasDir, WorldTileset.COLLISION_PNG);
             try
             {
                 TilesetRenderer.GenerateCollisionAtlas(collisionAtlasPath);
@@ -196,6 +194,10 @@ namespace DecompToGodot
 
             Console.WriteLine($"Found {allMapNames.Count} maps, {_layouts.Count} layouts");
 
+            // ── Build the shared TileSet from every layout, not only the filtered maps,
+            //    so source ids stay the same between runs ──
+            BuildWorldTileset(tsDir, atlasDir);
+
             if (_mapFilter != null)
             {
                 allMapNames = allMapNames
@@ -219,7 +221,7 @@ namespace DecompToGodot
             {
                 try
                 {
-                    if (ExportMap(mapName, tilesDir, tsDir, sceneDir, dataDir))
+                    if (ExportMap(mapName, sceneDir, dataDir))
                     {
                         exported++;
 
@@ -248,10 +250,7 @@ namespace DecompToGodot
 
         // ─────────── Map export ───────────
 
-        private bool ExportMap(
-            string mapName,
-            string tilesDir, string tsDir,
-            string sceneDir, string dataDir)
+        private bool ExportMap(string mapName, string sceneDir, string dataDir)
         {
             // Read map.json
             string mapJsonPath = Path.Combine(_decompPath, "data", "maps", mapName, "map.json");
@@ -297,67 +296,88 @@ namespace DecompToGodot
                 return false;
             }
 
-            // ── Ensure tileset atlas is rendered ──
-            string cacheKey = layout.PrimaryTileset + "|" + layout.SecondaryTileset;
-            TilesetCacheEntry tsCache;
-
-            if (!_tilesetCache.TryGetValue(cacheKey, out tsCache))
+            // ── Shared tileset units for this layout ──
+            var primaryUnit = _world.GetPrimaryUnit(layout.PrimaryTileset);
+            var secondaryUnit = _world.GetSecondaryUnit(layout.PrimaryTileset, layout.SecondaryTileset);
+            if (primaryUnit == null || secondaryUnit == null)
             {
-                tsCache = RenderTilesetAtlas(
-                    layout.PrimaryTileset, layout.SecondaryTileset, tilesDir);
-
-                if (tsCache == null)
-                {
-                    Console.WriteLine($"  SKIP: {mapName} — failed to render tileset atlas");
-                    return false;
-                }
-
-                _tilesetCache[cacheKey] = tsCache;
+                Console.WriteLine($"  SKIP: {mapName} — tilesets not available: {layout.PrimaryTileset} / {layout.SecondaryTileset}");
+                return false;
             }
 
-            // ── Write .tres ──
-            string safeName = mapName;
-            string tresFile = $"{safeName}_tileset.tres";
-            string groundRelPath = "../tiles/" + tsCache.GroundAtlasPng;
-            string overlayRelPath = "../tiles/" + tsCache.OverlayAtlasPng;
-            string collisionRelPath = "../tiles/collision_overlay.png";
-
-            GodotWriter.WriteTileSetResource(
-                Path.Combine(tsDir, tresFile),
-                groundRelPath, overlayRelPath, collisionRelPath,
-                tsCache.TotalMetatilePositions, true);
-
             // ── Write .tscn ──
-            string tilesetRelPath = "../tilesets/" + tresFile;
-            GodotWriter.WriteMapScene(
-                Path.Combine(sceneDir, $"{safeName}.tscn"),
+            string tilesetRelPath = "../tilesets/" + WorldTileset.TRES_NAME;
+            int missing = GodotWriter.WriteMapScene(
+                Path.Combine(sceneDir, $"{mapName}.tscn"),
                 tilesetRelPath, mapName, blockData,
-                layout.Width, layout.Height, true);
+                layout.Width, layout.Height,
+                (int id, out int groundSource, out int overlaySource, out int ax, out int ay) =>
+                {
+                    TilesetUnit unit;
+                    TileSlot slot;
+                    if (!_world.TryResolve(layout.PrimaryTileset, layout.SecondaryTileset, id, out unit, out slot))
+                    {
+                        groundSource = overlaySource = ax = ay = 0;
+                        return false;
+                    }
+                    groundSource = unit.GroundSourceId;
+                    overlaySource = unit.OverlaySourceId;
+                    ax = slot.X;
+                    ay = slot.Y;
+                    return true;
+                });
 
             // ── Write .json ──
             GodotWriter.WriteMapDataJson(
-                Path.Combine(dataDir, $"{safeName}.json"),
+                Path.Combine(dataDir, $"{mapName}.json"),
                 mapName, mapJson, blockData,
                 layout.Width, layout.Height,
-                tsCache.PrimaryAttributes,
-                tsCache.SecondaryAttributes);
+                primaryUnit.Own.Attributes,
+                secondaryUnit.Own.Attributes,
+                primaryUnit, secondaryUnit);
 
-            Console.WriteLine($"  OK: {mapName} ({layout.Width}×{layout.Height})");
+            string warn = missing > 0 ? $" ({missing} cells use undefined metatiles and were left empty)" : "";
+            Console.WriteLine($"  OK: {mapName} ({layout.Width}×{layout.Height}){warn}");
             return true;
         }
 
-        // ─────────── Tileset rendering ───────────
+        // ─────────── Shared tileset ───────────
 
-        private TilesetCacheEntry RenderTilesetAtlas(
-            string primaryLabel, string secondaryLabel,
-            string tilesDir)
+        private void BuildWorldTileset(string tsDir, string atlasDir)
         {
-            string primaryDir = ResolveTilesetPath(primaryLabel);
-            string secondaryDir = ResolveTilesetPath(secondaryLabel);
+            var animations = TilesetAnimationParser.Parse(_decompPath, _tilesetCallbacks);
 
-            if (primaryDir == null || secondaryDir == null)
+            var pairs = _layouts.Values
+                .Where(l => l.PrimaryTileset != "NULL" && l.SecondaryTileset != "NULL")
+                .Select(l => new KeyValuePair<string, string>(l.PrimaryTileset, l.SecondaryTileset))
+                .ToList();
+
+            _world = WorldTileset.Build(pairs, _tilesetOrder, label =>
             {
-                Console.WriteLine($"  ERROR: Cannot resolve tileset paths: {primaryLabel} / {secondaryLabel}");
+                TilesetData data;
+                if (_tilesetData.TryGetValue(label, out data))
+                    return data;
+
+                data = LoadTilesetData(label);
+                if (data != null && animations.ContainsKey(label))
+                    data.Animations = animations[label];
+                _tilesetData[label] = data;
+                return data;
+            });
+
+            Console.WriteLine($"Rendering shared tileset ({_world.Units.Count} tilesets)...");
+            _world.Render(atlasDir);
+            _world.WriteTres(Path.Combine(tsDir, WorldTileset.TRES_NAME));
+            _world.WriteIndexJson(Path.Combine(tsDir, WorldTileset.INDEX_NAME));
+            Console.WriteLine($"Shared tileset: {Path.Combine(tsDir, WorldTileset.TRES_NAME)}");
+        }
+
+        private TilesetData LoadTilesetData(string label)
+        {
+            string dir = ResolveTilesetPath(label);
+            if (dir == null)
+            {
+                Console.WriteLine($"  ERROR: Cannot resolve tileset path: {label}");
                 return null;
             }
 
@@ -366,57 +386,34 @@ namespace DecompToGodot
             // another tileset (e.g. Condominiums).  headers.h defines these via
             //   .tiles = gTilesetTiles_Condominiums
             //   .palettes = gTilesetPalettes_Condominiums
-            string secondaryTilesDir = null;
-            string secondaryPalettesDir = null;
+            string tilesDir = null;
+            string palettesDir = null;
 
-            if (_tilesetTilesFrom.ContainsKey(secondaryLabel))
+            if (_tilesetTilesFrom.ContainsKey(label))
             {
-                string tilesFromLabel = _tilesetTilesFrom[secondaryLabel];
-                secondaryTilesDir = ResolveTilesetPath(tilesFromLabel);
-                if (secondaryTilesDir != null)
-                    Console.WriteLine($"  Using tiles from {tilesFromLabel} → {secondaryTilesDir}");
+                string tilesFromLabel = _tilesetTilesFrom[label];
+                tilesDir = ResolveTilesetPath(tilesFromLabel);
+                if (tilesDir != null)
+                    Console.WriteLine($"  Using tiles from {tilesFromLabel} → {tilesDir}");
                 else
                     Console.WriteLine($"  WARNING: Cannot resolve tiles cross-ref: {tilesFromLabel}");
             }
 
-            if (_tilesetPalettesFrom.ContainsKey(secondaryLabel))
+            if (_tilesetPalettesFrom.ContainsKey(label))
             {
-                string palFromLabel = _tilesetPalettesFrom[secondaryLabel];
-                secondaryPalettesDir = ResolveTilesetPath(palFromLabel);
-                if (secondaryPalettesDir != null)
-                    Console.WriteLine($"  Using palettes from {palFromLabel} → {secondaryPalettesDir}");
+                string palFromLabel = _tilesetPalettesFrom[label];
+                palettesDir = ResolveTilesetPath(palFromLabel);
+                if (palettesDir != null)
+                    Console.WriteLine($"  Using palettes from {palFromLabel} → {palettesDir}");
                 else
                     Console.WriteLine($"  WARNING: Cannot resolve palette cross-ref: {palFromLabel}");
             }
 
-            // Build a safe filename from the tileset combo
-            string comboName = MakeSafe(StripPrefix(primaryLabel)) + "_" + MakeSafe(StripPrefix(secondaryLabel));
+            bool isSecondary;
+            if (!_tilesetIsSecondary.TryGetValue(label, out isSecondary))
+                isSecondary = Path.GetFileName(Path.GetDirectoryName(dir)) == "secondary";
 
-            string groundPng = comboName + "_ground.png";
-            string overlayPng = comboName + "_overlay.png";
-
-            Console.WriteLine($"  Rendering tileset: {comboName}");
-
-            int totalPositions = TilesetRenderer.RenderAtlases(
-                primaryDir, secondaryDir,
-                Path.Combine(tilesDir, groundPng),
-                Path.Combine(tilesDir, overlayPng),
-                secondaryTilesDir, secondaryPalettesDir);
-
-            // Load metatile attributes for JSON export
-            var primaryAttrs = TilesetRenderer.ReadMetatileAttributes(
-                Path.Combine(primaryDir, "metatile_attributes.bin"));
-            var secondaryAttrs = TilesetRenderer.ReadMetatileAttributes(
-                Path.Combine(secondaryDir, "metatile_attributes.bin"));
-
-            return new TilesetCacheEntry
-            {
-                GroundAtlasPng = groundPng,
-                OverlayAtlasPng = overlayPng,
-                TotalMetatilePositions = totalPositions,
-                PrimaryAttributes = primaryAttrs,
-                SecondaryAttributes = secondaryAttrs
-            };
+            return TilesetRenderer.LoadTileset(label, isSecondary, dir, tilesDir, palettesDir);
         }
 
         // ─────────── Decomp data parsing ───────────
@@ -528,6 +525,8 @@ namespace DecompToGodot
             var result = new Dictionary<string, bool>();
             _tilesetTilesFrom = new Dictionary<string, string>();
             _tilesetPalettesFrom = new Dictionary<string, string>();
+            _tilesetCallbacks = new Dictionary<string, string>();
+            _tilesetOrder = new List<string>();
 
             string headersPath = Path.Combine(_decompPath, "src", "data", "tilesets", "headers.h");
             if (!File.Exists(headersPath))
@@ -550,6 +549,7 @@ namespace DecompToGodot
                 {
                     currentLabel = labelMatch.Groups[1].Value;
                     currentSuffix = labelMatch.Groups[2].Value;
+                    _tilesetOrder.Add(currentLabel);
                     continue;
                 }
 
@@ -582,6 +582,13 @@ namespace DecompToGodot
                         {
                             _tilesetPalettesFrom[currentLabel] = "gTileset_" + palFrom;
                         }
+                    }
+
+                    // Match: .callback = InitTilesetAnim_XXX  (tile animations)
+                    var cbMatch = Regex.Match(line, @"\.callback\s*=\s*(\w+)");
+                    if (cbMatch.Success && cbMatch.Groups[1].Value != "NULL")
+                    {
+                        _tilesetCallbacks[currentLabel] = cbMatch.Groups[1].Value;
                     }
 
                     // End of struct
@@ -924,7 +931,7 @@ namespace DecompToGodot
         }
 
         /// <summary>Convert CamelCase to snake_case: "PalletTown" → "pallet_town", "GenericBuilding1" → "generic_building_1"</summary>
-        private static string CamelToSnake(string input)
+        internal static string CamelToSnake(string input)
         {
             if (string.IsNullOrEmpty(input)) return input;
 
@@ -958,17 +965,6 @@ namespace DecompToGodot
                 }
             }
             return sb.ToString();
-        }
-
-        private static string MakeSafe(string s)
-        {
-            if (string.IsNullOrEmpty(s)) return "unknown";
-            var sb = new StringBuilder();
-            foreach (char c in s)
-            {
-                if (char.IsLetterOrDigit(c) || c == '_') sb.Append(c);
-            }
-            return sb.Length > 0 ? sb.ToString() : "unknown";
         }
 
         private static string GetString(Dictionary<string, object> dict, string key)

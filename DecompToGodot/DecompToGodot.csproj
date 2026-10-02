@@ -41,6 +41,8 @@
     <Compile Include="Program.cs" />
     <Compile Include="TilesetRenderer.cs" />
     <Compile Include="GodotWriter.cs" />
+    <Compile Include="TilesetAnimations.cs" />
+    <Compile Include="WorldTileset.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />

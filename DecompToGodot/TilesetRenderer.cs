@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
@@ -9,8 +10,8 @@ namespace DecompToGodot
 {
     /// <summary>
     /// Loads decomp tileset assets (4bpp indexed tiles.png, JASC-PAL palettes,
-    /// metatiles.bin) and renders metatile atlas PNGs for use in Godot TileSet
-    /// resources.
+    /// metatiles.bin) and draws metatiles for the shared Godot TileSet atlases
+    /// (see <see cref="WorldTileset"/>).
     ///
     /// GBA metatile structure (16 bytes = 8 tile entries × 2 bytes):
     ///   [0..3] = bottom layer (TL, TR, BL, BR)
@@ -32,153 +33,80 @@ namespace DecompToGodot
         public const int ATLAS_COLUMNS = 8;
 
         /// <summary>
-        /// Render the ground atlas (bottom layer) and overlay atlas (top layer)
-        /// for a primary + secondary tileset combination.
+        /// Build the BG palette RAM the overworld uses: palettes 0..6 come from the primary
+        /// tileset, 7..12 from the secondary. Palettes 13..15 are reserved for weather and
+        /// effects and are never part of a tileset, so they stay black.
         /// </summary>
-        /// <param name="primaryDir">Path to primary tileset directory (e.g. data/tilesets/primary/general)</param>
-        /// <param name="secondaryDir">Path to secondary tileset directory</param>
-        /// <param name="groundAtlasPath">Output path for ground layer atlas PNG</param>
-        /// <param name="overlayAtlasPath">Output path for overlay layer atlas PNG</param>
-        /// <returns>Total number of metatile positions in the atlas</returns>
-        /// <summary>
-        /// Render the ground atlas (bottom layer) and overlay atlas (top layer)
-        /// for a primary + secondary tileset combination.
-        /// </summary>
-        /// <param name="primaryDir">Path to primary tileset directory</param>
-        /// <param name="secondaryDir">Path to secondary tileset directory (metatiles)</param>
-        /// <param name="groundAtlasPath">Output path for ground layer atlas PNG</param>
-        /// <param name="overlayAtlasPath">Output path for overlay layer atlas PNG</param>
-        /// <param name="secondaryTilesDir">
-        /// Optional: directory containing tiles.png for the secondary tileset.
-        /// Some tilesets (e.g. SilphCo) share tiles from another tileset (e.g. Condominiums).
-        /// If null, defaults to secondaryDir.
-        /// </param>
-        /// <param name="secondaryPalettesDir">
-        /// Optional: directory containing palettes/ for the secondary tileset.
-        /// If null, defaults to secondaryDir.
-        /// </param>
-        /// <returns>Total number of metatile positions in the atlas</returns>
-        public static int RenderAtlases(
-            string primaryDir, string secondaryDir,
-            string groundAtlasPath, string overlayAtlasPath,
-            string secondaryTilesDir = null, string secondaryPalettesDir = null)
+        public static Color[][] MergePalettes(TilesetData primary, TilesetData secondary)
         {
-            // Fall back to secondaryDir when no cross-reference override is given
-            if (secondaryTilesDir == null) secondaryTilesDir = secondaryDir;
-            if (secondaryPalettesDir == null) secondaryPalettesDir = secondaryDir;
-
-            // ── Load primary tile pixel indices (4bpp) ──
-            var primaryPixels = LoadTilePixelIndices(Path.Combine(primaryDir, "tiles.png"));
-            int primaryPngWidth = primaryPixels.GetLength(0);
-            int primaryPngHeight = primaryPixels.GetLength(1);
-            int primaryTileCount = (primaryPngWidth / 8) * (primaryPngHeight / 8);
-
-            // ── Load secondary tile pixel indices (may come from a different tileset dir) ──
-            byte[,] secondaryPixels = null;
-            int secondaryPngWidth = 0;
-            string secTilesPath = Path.Combine(secondaryTilesDir, "tiles.png");
-            if (File.Exists(secTilesPath))
-            {
-                secondaryPixels = LoadTilePixelIndices(secTilesPath);
-                secondaryPngWidth = secondaryPixels.GetLength(0);
-            }
-
-            // ── Load and merge palettes ──
-            //  palettes[0..6]   from primary
-            //  palettes[7..12]  from secondary (may come from a different tileset dir)
             var palettes = new Color[16][];
             for (int i = 0; i < 16; i++)
-                palettes[i] = new Color[16]; // default black/transparent
+                palettes[i] = new Color[16];
 
-            // Primary palettes 0-6
-            for (int i = 0; i < NUM_PALS_IN_PRIMARY; i++)
-            {
-                string palFile = Path.Combine(primaryDir, "palettes", $"{i:D2}.pal");
-                if (File.Exists(palFile))
-                    palettes[i] = LoadJascPalette(palFile);
-            }
-            // Secondary palettes 7-12 (loaded from overridden palette dir)
-            for (int i = NUM_PALS_IN_PRIMARY; i < NUM_PALS_TOTAL; i++)
-            {
-                string palFile = Path.Combine(secondaryPalettesDir, "palettes", $"{i:D2}.pal");
-                if (File.Exists(palFile))
-                    palettes[i] = LoadJascPalette(palFile);
-            }
+            if (primary != null)
+                for (int i = 0; i < NUM_PALS_IN_PRIMARY; i++)
+                    palettes[i] = primary.Palettes[i];
 
-            // ── Load metatiles ──
-            var primaryMetatiles = ReadMetatilesBin(Path.Combine(primaryDir, "metatiles.bin"));
-            var secondaryMetatiles = ReadMetatilesBin(Path.Combine(secondaryDir, "metatiles.bin"));
+            if (secondary != null)
+                for (int i = NUM_PALS_IN_PRIMARY; i < NUM_PALS_TOTAL; i++)
+                    palettes[i] = secondary.Palettes[i];
 
-            int primaryMetatileCount = primaryMetatiles.Length;
-            int secondaryMetatileCount = secondaryMetatiles.Length;
-
-            // Total atlas positions = NUM_METATILES_IN_PRIMARY + secondaryMetatileCount
-            // Metatile IDs 0..(primary-1) → atlas positions 0..(primary-1)
-            // Metatile IDs 640..(640+secondary-1) → atlas positions 640..(640+secondary-1)
-            int totalPositions = NUM_METATILES_IN_PRIMARY + secondaryMetatileCount;
-            int atlasRows = (totalPositions + ATLAS_COLUMNS - 1) / ATLAS_COLUMNS;
-            int atlasWidth = ATLAS_COLUMNS * 16;
-            int atlasHeight = atlasRows * 16;
-
-            // ARGB pixel buffers (initialized to 0 = transparent)
-            var groundBuf = new byte[atlasWidth * atlasHeight * 4];
-            var overlayBuf = new byte[atlasWidth * atlasHeight * 4];
-
-            // ── Render primary metatiles (positions 0 to primaryMetatileCount-1) ──
-            for (int i = 0; i < primaryMetatileCount; i++)
-            {
-                int col = i % ATLAS_COLUMNS;
-                int row = i / ATLAS_COLUMNS;
-                int ax = col * 16;
-                int ay = row * 16;
-
-                RenderMetatileLayer(groundBuf, atlasWidth, ax, ay,
-                    primaryMetatiles[i], false,
-                    primaryPixels, primaryPngWidth,
-                    secondaryPixels, secondaryPngWidth,
-                    palettes);
-
-                RenderMetatileLayer(overlayBuf, atlasWidth, ax, ay,
-                    primaryMetatiles[i], true,
-                    primaryPixels, primaryPngWidth,
-                    secondaryPixels, secondaryPngWidth,
-                    palettes);
-            }
-
-            // ── Render secondary metatiles (positions 640 to 640+secondaryMetatileCount-1) ──
-            for (int i = 0; i < secondaryMetatileCount; i++)
-            {
-                int pos = NUM_METATILES_IN_PRIMARY + i;
-                int col = pos % ATLAS_COLUMNS;
-                int row = pos / ATLAS_COLUMNS;
-                int ax = col * 16;
-                int ay = row * 16;
-
-                RenderMetatileLayer(groundBuf, atlasWidth, ax, ay,
-                    secondaryMetatiles[i], false,
-                    primaryPixels, primaryPngWidth,
-                    secondaryPixels, secondaryPngWidth,
-                    palettes);
-
-                RenderMetatileLayer(overlayBuf, atlasWidth, ax, ay,
-                    secondaryMetatiles[i], true,
-                    primaryPixels, primaryPngWidth,
-                    secondaryPixels, secondaryPngWidth,
-                    palettes);
-            }
-
-            // ── Save atlas PNGs ──
-            SaveArgbBitmap(groundBuf, atlasWidth, atlasHeight, groundAtlasPath);
-            SaveArgbBitmap(overlayBuf, atlasWidth, atlasHeight, overlayAtlasPath);
-
-            return totalPositions;
+            return palettes;
         }
 
+        /// <summary>
+        /// True if any of the 8 tile entries of a primary metatile reads from the
+        /// secondary half of VRAM (tile id 640+) or from a secondary palette (7+).
+        /// Such a metatile looks different for every secondary tileset it is paired with.
+        /// </summary>
+        public static bool DependsOnSecondary(ushort[] metatile)
+        {
+            for (int e = 0; e < 8; e++)
+            {
+                int tileId = metatile[e] & 0x3FF;
+                int palNum = (metatile[e] >> 12) & 0xF;
+                if (tileId >= NUM_TILES_IN_PRIMARY || palNum >= NUM_PALS_IN_PRIMARY)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Load a tileset folder (tiles.png, palettes/, metatiles.bin, metatile_attributes.bin).
+        /// Tiles and palettes can come from another folder when headers.h borrows them.
+        /// </summary>
+        public static TilesetData LoadTileset(
+            string label, bool isSecondary,
+            string dir, string tilesDir, string palettesDir)
+        {
+            var data = new TilesetData
+            {
+                Label = label,
+                IsSecondary = isSecondary,
+                Metatiles = ReadMetatilesBin(Path.Combine(dir, "metatiles.bin")),
+                Attributes = ReadMetatileAttributes(Path.Combine(dir, "metatile_attributes.bin")),
+                Palettes = new Color[16][]
+            };
+
+            string tilesPng = Path.Combine(tilesDir ?? dir, "tiles.png");
+            if (File.Exists(tilesPng))
+                data.TilePixels = LoadTilePixelIndices(tilesPng);
+            else
+                Console.WriteLine($"  WARNING: {label} has no tiles.png ({tilesPng})");
+
+            for (int i = 0; i < 16; i++)
+            {
+                string palFile = Path.Combine(palettesDir ?? dir, "palettes", $"{i:D2}.pal");
+                data.Palettes[i] = File.Exists(palFile) ? LoadJascPalette(palFile) : new Color[16];
+            }
+
+            return data;
+        }
         /// <summary>
         /// Read the raw 4-bit palette indices from a 4bpp indexed PNG.
         /// Returns byte[width, height] of indices 0-15.
         /// </summary>
-        private static byte[,] LoadTilePixelIndices(string tilesPngPath)
+        public static byte[,] LoadTilePixelIndices(string tilesPngPath)
         {
             using (var bmp = new Bitmap(tilesPngPath))
             {
@@ -249,7 +177,7 @@ namespace DecompToGodot
         /// <summary>
         /// Load a JASC-PAL palette file (16 entries of R G B).
         /// </summary>
-        private static Color[] LoadJascPalette(string palPath)
+        public static Color[] LoadJascPalette(string palPath)
         {
             var colors = new Color[16];
             var lines = File.ReadAllLines(palPath);
@@ -303,7 +231,7 @@ namespace DecompToGodot
         /// Read metatiles.bin → array of metatile data.
         /// Each metatile = ushort[8] (8 tile entries).
         /// </summary>
-        private static ushort[][] ReadMetatilesBin(string path)
+        public static ushort[][] ReadMetatilesBin(string path)
         {
             if (!File.Exists(path))
                 return new ushort[0][];
@@ -354,21 +282,24 @@ namespace DecompToGodot
         }
 
         /// <summary>
-        /// Render one layer of a metatile into an ARGB pixel buffer.
+        /// Draw one layer of a metatile into an RGBA pixel buffer.
+        /// Tiles covered by an active animation are taken from that animation's
+        /// current frame instead of tiles.png, exactly like the game's VRAM DMA.
         /// </summary>
-        /// <param name="buf">ARGB buffer (4 bytes per pixel: B, G, R, A)</param>
+        /// <param name="buf">RGBA buffer (4 bytes per pixel: R, G, B, A)</param>
         /// <param name="bufWidth">Buffer width in pixels</param>
-        /// <param name="destX">Destination X in buffer (top-left of 16×16 area)</param>
+        /// <param name="destX">Destination X in buffer (top left of the 16×16 area)</param>
         /// <param name="destY">Destination Y in buffer</param>
         /// <param name="metatile">8 tile entries for this metatile</param>
-        /// <param name="isTopLayer">true = render entries 4-7 (top/overlay), false = entries 0-3 (bottom/ground)</param>
-        private static void RenderMetatileLayer(
+        /// <param name="isTopLayer">true = entries 4..7 (overlay), false = entries 0..3 (ground)</param>
+        /// <param name="animations">Animations active for this metatile (may be null)</param>
+        /// <param name="animFrames">Frame index per entry of <paramref name="animations"/></param>
+        public static void DrawMetatileLayer(
             byte[] buf, int bufWidth,
             int destX, int destY,
             ushort[] metatile, bool isTopLayer,
-            byte[,] primaryPixels, int primaryPngWidth,
-            byte[,] secondaryPixels, int secondaryPngWidth,
-            Color[][] palettes)
+            TilesetData primary, TilesetData secondary, Color[][] palettes,
+            IList<TileAnimation> animations = null, int[] animFrames = null)
         {
             int startEntry = isTopLayer ? 4 : 0;
 
@@ -384,34 +315,47 @@ namespace DecompToGodot
                 int tileOffX = (e % 2) * 8;
                 int tileOffY = (e / 2) * 8;
 
-                // Select tile source
-                byte[,] pixels;
-                int pngWidth;
-                int adjustedId;
+                // Select tile source: animation frame, primary tiles or secondary tiles
+                byte[,] pixels = null;
+                int adjustedId = 0;
 
-                if (tileId < NUM_TILES_IN_PRIMARY)
+                if (animations != null)
                 {
-                    pixels = primaryPixels;
-                    pngWidth = primaryPngWidth;
-                    adjustedId = tileId;
-                }
-                else
-                {
-                    pixels = secondaryPixels;
-                    pngWidth = secondaryPngWidth;
-                    adjustedId = tileId - NUM_TILES_IN_PRIMARY;
+                    for (int a = 0; a < animations.Count; a++)
+                    {
+                        if (!animations[a].Covers(tileId)) continue;
+                        pixels = animations[a].FramePixels[animFrames[a]];
+                        adjustedId = tileId - animations[a].DestTile;
+                        break;
+                    }
                 }
 
-                if (pixels == null || pngWidth == 0) continue;
+                if (pixels == null)
+                {
+                    if (tileId < NUM_TILES_IN_PRIMARY)
+                    {
+                        pixels = primary?.TilePixels;
+                        adjustedId = tileId;
+                    }
+                    else
+                    {
+                        pixels = secondary?.TilePixels;
+                        adjustedId = tileId - NUM_TILES_IN_PRIMARY;
+                    }
+                }
 
+                if (pixels == null) continue;
+
+                int pngWidth = pixels.GetLength(0);
                 int tilesPerRow = pngWidth / 8;
+                if (tilesPerRow == 0) continue;
                 int maxTile = tilesPerRow * (pixels.GetLength(1) / 8);
                 if (adjustedId < 0 || adjustedId >= maxTile) continue;
 
                 int tileCol = adjustedId % tilesPerRow;
                 int tileRow = adjustedId / tilesPerRow;
 
-                Color[] pal = (palNum < 16) ? palettes[palNum] : palettes[0];
+                Color[] pal = palettes[palNum];
 
                 // Render 8×8 tile
                 for (int py = 0; py < 8; py++)
@@ -421,13 +365,7 @@ namespace DecompToGodot
                         int srcPx = hFlip ? (7 - px) : px;
                         int srcPy = vFlip ? (7 - py) : py;
 
-                        int pixX = tileCol * 8 + srcPx;
-                        int pixY = tileRow * 8 + srcPy;
-
-                        if (pixX >= pixels.GetLength(0) || pixY >= pixels.GetLength(1))
-                            continue;
-
-                        byte idx = pixels[pixX, pixY];
+                        byte idx = pixels[tileCol * 8 + srcPx, tileRow * 8 + srcPy];
                         if (idx == 0) continue; // palette index 0 = transparent
 
                         Color c = pal[idx];
@@ -435,32 +373,12 @@ namespace DecompToGodot
                         int dy = destY + tileOffY + py;
                         int off = (dy * bufWidth + dx) * 4;
 
-                        buf[off + 0] = c.B;
+                        buf[off + 0] = c.R;
                         buf[off + 1] = c.G;
-                        buf[off + 2] = c.R;
+                        buf[off + 2] = c.B;
                         buf[off + 3] = 255; // fully opaque
                     }
                 }
-            }
-        }
-
-        /// <summary>
-        /// Save an ARGB pixel buffer as a 32-bit PNG.
-        /// </summary>
-        public static void SaveArgbBitmap(byte[] buf, int width, int height, string path)
-        {
-            using (var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb))
-            {
-                var lockData = bmp.LockBits(
-                    new Rectangle(0, 0, width, height),
-                    ImageLockMode.WriteOnly,
-                    PixelFormat.Format32bppArgb);
-
-                Marshal.Copy(buf, 0, lockData.Scan0, buf.Length);
-                bmp.UnlockBits(lockData);
-
-                Directory.CreateDirectory(Path.GetDirectoryName(path));
-                bmp.Save(path, ImageFormat.Png);
             }
         }
 

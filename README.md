@@ -48,6 +48,54 @@ DecompToGodot.exe C:\pokefirered-master C:\MyGodotProject\maps PalletTown,Route1
 
 Either way, the output folder can be opened directly as a Godot 4.3+ project.
 
+### Decomp output layout
+
+`DecompToGodot` writes one shared TileSet for the whole game. Every map scene points at the same file, so you edit a tileset once and every map picks it up.
+
+```
+project.godot
+tilesets/
+  world_tileset.tres     the only TileSet, used by every map
+  world_tileset.json     which source holds which metatile, for runtime lookups
+  atlases/
+    general_ground.png   one Ground and one Overlay atlas per tileset
+    general_overlay.png
+    pallet_town_ground.png
+    ...
+    collision.png
+scenes/PalletTown.tscn   Ground, Overlay and Collisions TileMapLayers
+data/PalletTown.json     events, connections, behaviors, collision, elevation
+```
+
+How the shared TileSet is organised:
+
+| Source id | What it holds |
+|-----------|---------------|
+| 0 | Collision overlay (atlas X = collision, atlas Y = elevation) |
+| 1, 2 | General Ground, General Overlay |
+| 3, 4 | Building Ground, Building Overlay |
+| 5 and up | One Ground and Overlay pair per secondary tileset |
+
+`world_tileset.json` lists the exact ids. The TileSet is always built from every layout in the decomp, so the ids stay the same even when you export a single map with a filter.
+
+Each atlas follows the Porymap grid first (8 metatiles per row, in id order). Below that come two extra sections:
+
+* **Borrowed metatiles.** Some Building metatiles (576 to 639) read tiles and palettes from the secondary tileset, so they look different in every building. Each secondary tileset that pairs with Building carries its own correct copy.
+* **Animated metatiles.** Tile animations come straight from `src/tileset_anims.c`, so water, flowers, fountains, steam and the Vermilion Gym door all animate in the editor and in game. Each animated metatile sits at the start of a row with its frames to the right, using Godot's built in tile animation. Frame timings match the GBA. The plain grid still shows the first frame as a picture, but you paint the animated version.
+
+Ground tiles carry the metatile attributes as TileSet custom data, so game code can read them straight from the map:
+
+```gdscript
+var data := $Ground.get_cell_tile_data(cell)
+var behavior: int = data.get_custom_data("behavior")
+```
+
+Custom data layers: `metatile_id`, `behavior`, `terrain_type`, `encounter_type`, `layer_type`.
+
+If you re-export into a folder made by an older version, you can delete the old `tiles/` folder and the old `tilesets/*_tileset.tres` files. Nothing uses them anymore.
+
+The ROM based exporter (`RomAssetExtractor.Godot`) still writes one TileSet per map.
+
 ---
 
 ## Extracting Assets (CLI)
